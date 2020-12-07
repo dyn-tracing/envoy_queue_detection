@@ -2,5 +2,5 @@
     url = https://github.com/fruffy/microservices-demo
     path = microservices-demo
 [submodule "wasm"]
-    url = https://github.com/solo-io/wasm
+    url = https://github.com/fruffy/wasm
     path = wasm
