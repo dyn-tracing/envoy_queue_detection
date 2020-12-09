@@ -1,3 +1,5 @@
+#!/bin/bash
+
 # Configuration for Ubuntu 18.04
 FILE_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
 cd ${FILE_DIR}/..
@@ -10,9 +12,7 @@ sudo apt-get install -y apt-transport-https gnupg2 curl
 git submodule update --init --recursive
 
 # docker
-curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo apt-key add -
-sudo apt update
-sudo apt-get install docker-ce docker-ce-cli containerd.io
+sudo apt install docker.io
 # docker without sudo
 sudo usermod -aG docker $USER
 
@@ -26,6 +26,7 @@ sudo apt-get install -y kubectl
 # minikube
 curl -LO https://storage.googleapis.com/minikube/releases/latest/minikube_latest_amd64.deb
 sudo dpkg -i minikube_latest_amd64.deb
+rm minikube_latest_amd64.deb
 # configure minikube
 # bookinfo requires more memory
 minikube config set memory 4096
@@ -45,6 +46,9 @@ pip3 install --user prometheus-api-client
 # download and unpack istio
 curl -L https://istio.io/downloadIstio | ISTIO_VERSION=1.8.0 TARGET_ARCH=x86_64 sh -
 
+# create the bin directory
+mkdir -p bin
+
 # download the unpatched wasme
 wget  --output-document="bin/wasme" https://github.com/solo-io/wasm/releases/download/v0.0.32/wasme-linux-amd64
 
@@ -53,7 +57,7 @@ wget  --output-document="bin/wasme" https://github.com/solo-io/wasm/releases/dow
 
 # download fortio
 curl -L https://github.com/fortio/fortio/releases/download/v1.11.4/fortio-linux_x64-1.11.4.tgz \
- | tar --strip-components=2  -C ../bin usr/bin/fortio -xvzpf -
+ | tar --strip-components=2  -C bin usr/bin/fortio -xvzpf -
 
 
 
