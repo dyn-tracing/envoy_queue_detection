@@ -193,10 +193,10 @@ def get_gateway_info(platform):
         cmd += " -o jsonpath={.spec.ports[?(@.name==\"http2\")].nodePort}"
         ingress_port = util.get_output_from_proc(cmd).decode("utf-8")
 
-    log.info("Ingress Host: %s", ingress_host)
-    log.info("Ingress Port: %s", ingress_port)
+    log.debug("Ingress Host: %s", ingress_host)
+    log.debug("Ingress Port: %s", ingress_port)
     gateway_url = f"{ingress_host}:{ingress_port}"
-    log.info("Gateway: %s", gateway_url)
+    log.debug("Gateway: %s", gateway_url)
 
     return ingress_host, ingress_port, gateway_url
 
@@ -236,18 +236,31 @@ def setup_bookinfo_deployment(platform, multizonal):
     return result
 
 
-def send_request(url, _num):
-    requests.get(url)
+def burst_loop(url):
+    NUM_REQUESTS = 500
+    MAX_THREADS = 32
+
+    def timeout_request(_):
+        try:
+            # the timeout effectively makes this request async
+            requests.get(url, timeout=0.001)
+        except requests.exceptions.ReadTimeout:
+            pass
+
+    log.info("Starting burst...")
+    # quick hack until I found a better way
+    with ThreadPoolExecutor(max_workers=MAX_THREADS) as p:
+        for _ in p.map(timeout_request, range(NUM_REQUESTS)):
+            pass
+    log.info("Done with burst...")
 
 
 def do_burst(platform):
-    NUM_REQUESTS = 500
     _, _, gateway_url = get_gateway_info(platform)
     url = f"http://{gateway_url}/productpage"
-    # quick hack until I found a better way
-    with ThreadPoolExecutor(max_workers=32) as p:
-        for _ in p.map(lambda x: send_request(url, x), range(NUM_REQUESTS)):
-            pass
+    p = Process(target=burst_loop, args=(url, ))
+    p.start()
+    # do not care about killing that process
 
 
 def find_congestion(platform, starting_time):
@@ -414,13 +427,40 @@ def test_fault_injection(prom_api, platform):
     log.info("Cluster killed")
 
 
+def check_congestion(platform, writer, congestion_ts):
+    detection_ts = find_congestion(platform, congestion_ts)
+    if detection_ts is None:
+        writer.writerow(["no", "." * 5])
+        log.info("No congestion caused")
+        return
+    log.info("Sent burst at %s recorded it at %s",
+              ns_to_timestamp(congestion_ts), ns_to_timestamp(detection_ts))
+    latency = (int(detection_ts) - int(congestion_ts))
+    log.info("Latency between sending and recording in storage is %s seconds",
+             (latency / TO_NANOSECONDS))
+    with open("prom.csv", "r") as prom:
+        avg = 0
+        num_of_recordings = 0.0
+        read = csv.reader(prom)
+        for line in read:
+            if line[0] != "Time":  # don't look at the header
+                timestamp = float(line[0])
+                if detection_ts > timestamp > congestion_ts:
+                    num_of_recordings += 1
+        if num_of_recordings != 0.0:
+            avg = avg / num_of_recordings
+        writer.writerow(["yes", congestion_ts, detection_ts, latency,
+                         (latency / TO_NANOSECONDS), avg])
+
+
 def do_multiple_runs(platform, num_experiments, output_file):
     with open(output_file, "w+") as csvfile:
         writer = csv.writer(csvfile, delimiter=' ')
         writer.writerow(["found congestion?", "congestion started",
                          "congested detected",
                          "difference in nanoseconds",
-                         "difference in seconds", "average load between inducing and detecting congestion"])
+                         "difference in seconds",
+                         "average load between inducing and detecting congestion"])
         for _ in range(int(num_experiments)):
             time.sleep(30)
             # once everything has started, retrieve the necessary url info
@@ -429,9 +469,9 @@ def do_multiple_runs(platform, num_experiments, output_file):
             inject_failure()
             time.sleep(10)
             log.info("Sending burst")
-            time_of_congestion = int(time.time() * TO_NANOSECONDS)
+            congestion_ts = int(time.time() * TO_NANOSECONDS)
             log.info("Causing congestion at %s",
-                     ns_to_timestamp(time_of_congestion))
+                     ns_to_timestamp(congestion_ts))
             do_burst(platform)
             time.sleep(10)
             cur_time = ns_to_timestamp(time.time() * TO_NANOSECONDS)
@@ -440,34 +480,8 @@ def do_multiple_runs(platform, num_experiments, output_file):
             time.sleep(30)
             cur_time = ns_to_timestamp(time.time() * TO_NANOSECONDS)
             log.info("Done at time %s", cur_time)
-            first_recorded_congestion = find_congestion(
-                platform, time_of_congestion)
-            if first_recorded_congestion is not None:
-                congestion_ts = ns_to_timestamp(time_of_congestion)
-                detection_ts = ns_to_timestamp(first_recorded_congestion)
-                log.info("Sent burst at %s recorded it at %s",
-                         congestion_ts, detection_ts)
-                latency = (int(first_recorded_congestion) -
-                           int(time_of_congestion))
-                log.info(
-                    "Latency between sending and recording in storage is %s seconds", (latency / TO_NANOSECONDS))
-                with open("prom.csv", "r") as prom:
-                    avg = 0
-                    num_of_recordings = 0.0
-                    read = csv.reader(prom)
-                    for line in read:
-                        if line[0] != "Time":  # don't look at the header
-                            timestamp = float(line[0])
-                            if timestamp > time_of_congestion and timestamp < first_recorded_congestion:
-                                avg += float(line[1])
-                                num_of_recordings += 1
-                    if num_of_recordings != 0.0:
-                        avg = avg / num_of_recordings
-                    writer.writerow(
-                        ["yes", time_of_congestion, first_recorded_congestion, latency, (latency / TO_NANOSECONDS), avg])
-            else:
-                writer.writerow(["no", "." * 5])
-                log.info("No congestion caused")
+            # process results
+            check_congestion(platform, writer, congestion_ts)
             # sleep long enough that the congestion times will not be mixed up
             time.sleep(5)
 
@@ -496,6 +510,7 @@ def do_experiment(platform, multizonal, filter_name, num_experiments, output_fil
         deploy_filter(filter_name)
         wait_until_pods_ready(platform)
 
+    # once everything has started, retrieve the necessary url info
     _, _, gateway_url = get_gateway_info(platform)
     # set up storage to query later
     storage_proc = launch_storage_mon()
@@ -545,7 +560,7 @@ def build_filter(filter_dir, filter_name):
 
 
 def undeploy_filter(filter_name):
-    cmd = f"kubectl delete -f {YAML_DIR}/istio-config.yaml && "
+    cmd = f"kubectl delete -f {YAML_DIR}/istio-config.yaml ; "
     cmd += f"kubectl delete -f {YAML_DIR}/virtual-service-reviews-balance.yaml "
     util.exec_process(cmd)
     cmd = f"{WASME_BIN} undeploy istio {filter_name}:{FILTER_TAG} "
