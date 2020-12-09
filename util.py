@@ -3,9 +3,14 @@ import subprocess
 import shutil
 import logging as log
 from pathlib import Path
+from datetime import datetime
+import time
+
 
 EXIT_SUCCESS = 0
 EXIT_FAILURE = 1
+
+TO_NANOSECONDS = 1e9  # everything is in nanoseconds
 
 
 def is_valid_file(parser, arg):
@@ -85,3 +90,13 @@ def exec_process(cmd, *args, **kwargs):
             log.error("Output:\n%s", result.stderr.decode("utf-8"))
         log.error("END %s", 40 * "#")
     return result.returncode
+
+
+def ns_to_timestamp(str_ns):
+    ns = int(str_ns)
+    dt = datetime.fromtimestamp(ns / 1e9)
+    return f"{dt.strftime('%H:%M:%S.%f')}.{(ns % 1e3):03.0f}"
+
+
+def nano_ts():
+    return ns_to_timestamp(time.time() * TO_NANOSECONDS)

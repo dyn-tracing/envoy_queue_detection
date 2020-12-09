@@ -8,7 +8,6 @@ import signal
 import csv
 from multiprocessing import Process
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
 from pathlib import Path
 import requests
 
@@ -32,9 +31,8 @@ FILTER_DIR = FILE_DIR.joinpath("message_counter")
 FILTER_TAG = "1"
 FILTER_ID = "test"
 CONGESTION_PERIOD = 1607016396875512000
-TO_NANOSECONDS = 1e9  # everything is in nanoseconds
 OUTPUT_FILE = "output.csv"
-NUM_EXPERIMENTS = 10
+NUM_EXPERIMENTS = 1
 
 # the kubernetes python API sucks, but keep this for later
 
@@ -68,29 +66,34 @@ def deploy_addons():
     apply_cmd = "kubectl apply -f "
     url = "https://raw.githubusercontent.com/istio/istio/release-1.8"
     cmd = f"{apply_cmd} {YAML_DIR}/prometheus-mod.yaml && "
-    cmd += f"{apply_cmd} {url}/samples/addons/grafana.yaml && "
-    cmd += f"{apply_cmd} {url}/samples/addons/jaeger.yaml && "
-    cmd += f"{apply_cmd} {url}/samples/addons/kiali.yaml || "
-    cmd += f"{apply_cmd} {url}/samples/addons/kiali.yaml"
+    cmd += f"{apply_cmd} {url}/samples/addons/grafana.yaml "
+    # cmd += f"{apply_cmd} {url}/samples/addons/jaeger.yaml && "
+    # cmd += f"{apply_cmd} {url}/samples/addons/kiali.yaml || "
+    # cmd += f"{apply_cmd} {url}/samples/addons/kiali.yaml"
     result = util.exec_process(cmd)
+    if result != util.EXIT_SUCCESS:
+        return result
 
-    wait_cmd = "/bin/bash -c "
-    wait_cmd += "'echo $(kubectl get deploy -n istio-system -o name) |"
-    wait_cmd += "{ read -d EOF deploy; for i in $deploy; "
-    wait_cmd += "do kubectl rollout status -n istio-system "
-    wait_cmd += "$i -w --timeout=180s; done; }'"
-    result = util.exec_process(wait_cmd)
+    cmd = "kubectl get deploy -n istio-system -o name"
+    deployments = util.get_output_from_proc(cmd).decode("utf-8").strip()
+    deployments = deployments.split("\n")
+    for depl in deployments:
+        wait_cmd = "kubectl rollout status -n istio-system "
+        wait_cmd += f"{depl} -w --timeout=180s"
+        _ = util.exec_process(wait_cmd)
     log.info("Addons are ready.")
-    return result
+    return util.EXIT_SUCCESS
 
 
 def bookinfo_wait():
-    wait_cmd = "/bin/bash -c 'echo $(kubectl get deploy -o name) |"
-    wait_cmd += "{ read -d EOF deploy; for i in $deploy; "
-    wait_cmd += "do kubectl rollout status $i -w --timeout=180s; done; }'"
-    result = util.exec_process(wait_cmd)
+    cmd = "kubectl get deploy -o name"
+    deployments = util.get_output_from_proc(cmd).decode("utf-8").strip()
+    deployments = deployments.split("\n")
+    for depl in deployments:
+        wait_cmd = f"kubectl rollout status {depl} -w --timeout=180s"
+        _ = util.exec_process(wait_cmd)
     log.info("Bookinfo is ready.")
-    return result
+    return util.EXIT_SUCCESS
 
 
 def deploy_bookinfo():
@@ -148,15 +151,14 @@ def check_kubernetes_status():
 
 def start_kubernetes(platform, multizonal):
     if platform == "GCP":
+        cmd = "gcloud container clusters create demo --enable-autoupgrade "
+        cmd += "--enable-autoscaling --min-nodes=3 "
+        cmd += "--max-nodes=10 --num-nodes=5 "
         if multizonal:
-            cmd = "gcloud container clusters create demo --enable-autoupgrade "
-            cmd += "--enable-autoscaling --min-nodes=3 --max-nodes=10 "
-            cmd += "--num-nodes=5 --region us-central1-a --node-locations "
-            cmd += "us-central1-b us-central1-c us-central1-a "
+            cmd += "--region us-central1-a --node-locations us-central1-b "
+            cmd += "us-central1-c us-central1-a "
         else:
-            cmd = "gcloud container clusters create demo --enable-autoupgrade "
-            cmd += "--enable-autoscaling --min-nodes=3 --max-nodes=10 "
-            cmd += "--num-nodes=5 --zone=us-central1-a "
+            cmd += "--zone=us-central1-a "
     else:
         cmd = "minikube start --memory=8192 --cpus=4 "
     result = util.exec_process(cmd)
@@ -165,7 +167,8 @@ def start_kubernetes(platform, multizonal):
 
 def stop_kubernetes(platform):
     if platform == "GCP":
-        cmd = "gcloud container clusters delete demo --zone us-central1-a --quiet"
+        cmd = "gcloud container clusters delete "
+        cmd += "demo --zone us-central1-a --quiet "
     else:
         # delete minikube
         cmd = "minikube delete"
@@ -177,13 +180,13 @@ def get_gateway_info(platform):
     ingress_host = ""
     ingress_port = ""
     if platform == "GCP":
-        cmd = f"kubectl -n istio-system get service istio-ingressgateway -o jsonpath=" + "'"
-        cmd += "{.status.loadBalancer.ingress[0].ip}" + "'"
+        cmd = "kubectl -n istio-system get service istio-ingressgateway "
+        cmd += "-o jsonpath={.status.loadBalancer.ingress[0].ip} "
         ingress_host = util.get_output_from_proc(
             cmd).decode("utf-8").replace("'", "")
 
-        cmd = "kubectl -n istio-system get service istio-ingressgateway -o jsonpath='{.spec.ports[?(@.name=="
-        cmd += '"' + "http2" + '"' + ")].port}'"
+        cmd = "kubectl -n istio-system get service istio-ingressgateway "
+        cmd += " -o jsonpath={.spec.ports[?(@.name==\"http2\")].port}"
         ingress_port = util.get_output_from_proc(
             cmd).decode("utf-8").replace("'", "")
     else:
@@ -206,21 +209,10 @@ def start_fortio(gateway_url):
     # fortio_pod_name = util.get_output_from_proc(cmd).decode("utf-8")
     # cmd = f"kubectl exec {fortio_pod_name} -c fortio -- /usr/bin/fortio "
     cmd = f"{FILE_DIR}/bin/fortio "
-    cmd += "load -c 50 -qps 2000 -jitter -t 0 -loglevel Warning "
+    cmd += "load -c 50 -qps 500 -jitter -t 0 -loglevel Warning "
     cmd += f"http://{gateway_url}/productpage"
     fortio_proc = util.start_process(cmd, preexec_fn=os.setsid)
     return fortio_proc
-
-
-def wait_until_pods_ready(platform):
-    if platform == "GCP":
-        cmd = "kubectl get pods --field-selector status.phase!=Running --all-namespaces"
-        output = util.get_output_from_proc(cmd).decode("utf-8")
-        while "No resources found" not in str(output) and output != "" and output != b'':
-            log.info("waiting for resources to run")
-            time.sleep(2)
-            cmd = "kubectl get pods --field-selector status.phase!=Running --all-namespaces"
-            output = util.get_output_from_proc(cmd)
 
 
 def setup_bookinfo_deployment(platform, multizonal):
@@ -232,7 +224,6 @@ def setup_bookinfo_deployment(platform, multizonal):
     if result != util.EXIT_SUCCESS:
         return result
     result = deploy_addons()
-    wait_until_pods_ready(platform)
     return result
 
 
@@ -293,9 +284,9 @@ def find_congestion(platform, starting_time):
         # we have congestion at more than 1 service
         if len(congestion_dict) > 1:
             for congested_service, congestion_ts in congestion_dict.items():
-                congestion_ts_str = ns_to_timestamp(congestion_ts)
-                log_str = (
-                    f"Congestion at {congested_service} at time {congestion_ts_str}")
+                congestion_ts_str = util.ns_to_timestamp(congestion_ts)
+                log_str = (f"Congestion at {congested_service}"
+                           f"at time {congestion_ts_str}")
                 log.info(log_str)
             return min(congestion_dict.values())
 
@@ -325,12 +316,6 @@ def query_storage(platform):
                 line_time, line_name = line.split("->")
                 logs.append([line_time, line_name])
     return sorted(logs, key=lambda tup: tup[0])
-
-
-def ns_to_timestamp(str_ns):
-    ns = int(str_ns)
-    dt = datetime.fromtimestamp(ns / 1e9)
-    return f"{dt.strftime('%H:%M:%S.%f')}.{(ns % 1e3):03.0f}"
 
 
 def launch_prometheus():
@@ -365,66 +350,22 @@ def launch_storage_mon():
     return storage_proc
 
 
-def query_prometheus(prom_api):
-    query = prom_api.custom_query(
-        query="(histogram_quantile(0.50, sum(irate(istio_request_duration_milliseconds_bucket{reporter=\"source\",destination_service=~\"ratings.default.svc.cluster.local\"}[1m])) by (le)) / 1000) or histogram_quantile(0.50, sum(irate(istio_request_duration_seconds_bucket{reporter=\"source\",destination_service=~\"ratings.default.svc.cluster.local\"}[1m])) by (le))")
-    for q in query:
-        val = q["value"]
-        query_time = datetime.fromtimestamp(val[0])
-        latency = float(val[1]) * 1000
-        log.info("Time: %s Latency (ms) %s", query_time, latency)
-
-
-def query_loop(prom_api, seconds):
-    for _ in range(seconds):
-        query_prometheus(prom_api)
-        time.sleep(1)
-
-
 def query_csv_loop(prom_api):
     with open("prom.csv", "w+") as csvfile:
         writer = csv.writer(csvfile, delimiter=',')
         writer.writerow(["Time", "RPS"])
         while True:
             query = prom_api.custom_query(
-                query="(histogram_quantile(0.90, sum(irate(istio_request_duration_milliseconds_bucket{reporter=\"source\",destination_service=~\"productpage.default.svc.cluster.local\"}[1m])) by (le)) / 1000) or histogram_quantile(0.90, sum(irate(istio_request_duration_seconds_bucket{reporter=\"source\",destination_service=~\"productpage.default.svc.cluster.local\"}[1m])) by (le))")
+                query="(histogram_quantile(0.50, sum(irate(istio_request_duration_milliseconds_bucket{reporter=\"source\",destination_service=~\"productpage.default.svc.cluster.local\"}[1m])) by (le)) / 1000) or histogram_quantile(0.50, sum(irate(istio_request_duration_seconds_bucket{reporter=\"source\",destination_service=~\"productpage.default.svc.cluster.local\"}[1m])) by (le))")
             for q in query:
                 val = q["value"]
                 latency = float(val[1]) * 1000
-                query_time = datetime.fromtimestamp(val[0])
-                log.info("Time: %s 90pct Latency (ms) %s", query_time, latency)
-                query_ns = f"{val[0] * TO_NANOSECONDS:.7f}"
+                query_time = util.datetime.fromtimestamp(val[0])
+                log.info("Time: %s 50pct Latency (ms) %s", query_time, latency)
+                query_ns = f"{val[0] * util.TO_NANOSECONDS:.7f}"
                 writer.writerow([query_ns, latency])
                 csvfile.flush()
             time.sleep(1)
-
-
-def test_fault_injection(prom_api, platform):
-    if check_kubernetes_status() != util.EXIT_SUCCESS:
-        log.error("Kubernetes is not set up."
-                  " Did you run the deployment script?")
-        sys.exit(util.EXIT_FAILURE)
-    # once everything has started, retrieve the necessary url info
-    _, _, gateway_url = get_gateway_info(platform)
-    cur_time = ns_to_timestamp(time.time() * TO_NANOSECONDS)
-    log.info("Running Fortio at time %s", cur_time)
-    fortio_proc = start_fortio(gateway_url)
-    # let things sink in a little
-    query_loop(prom_api, 30)
-    cur_time = ns_to_timestamp(time.time() * TO_NANOSECONDS)
-    log.info("Injecting latency at time %s", cur_time)
-    inject_failure()
-    query_loop(prom_api, 30)
-    cur_time = ns_to_timestamp(time.time() * TO_NANOSECONDS)
-    log.info("Removing latency at time %s", cur_time)
-    remove_failure()
-    # query_loop(prom_api, 60)
-    cur_time = ns_to_timestamp(time.time() * TO_NANOSECONDS)
-    log.info("Done at time %s", cur_time)
-    # terminate fortio by sending an interrupt to the process group
-    os.killpg(os.getpgid(fortio_proc.pid), signal.SIGINT)
-
-    log.info("Cluster killed")
 
 
 def check_congestion(platform, writer, congestion_ts):
@@ -434,23 +375,23 @@ def check_congestion(platform, writer, congestion_ts):
         log.info("No congestion caused")
         return
     log.info("Sent burst at %s recorded it at %s",
-              ns_to_timestamp(congestion_ts), ns_to_timestamp(detection_ts))
+             util.ns_to_timestamp(congestion_ts), util.ns_to_timestamp(detection_ts))
     latency = (int(detection_ts) - int(congestion_ts))
     log.info("Latency between sending and recording in storage is %s seconds",
-             (latency / TO_NANOSECONDS))
+             (latency / util.TO_NANOSECONDS))
     with open("prom.csv", "r") as prom:
         avg = 0
-        num_of_recordings = 0.0
+        num_of_recordings = 0
         read = csv.reader(prom)
+        next(read, None)  # skip the headers
         for line in read:
-            if line[0] != "Time":  # don't look at the header
-                timestamp = float(line[0])
-                if detection_ts > timestamp > congestion_ts:
-                    num_of_recordings += 1
-        if num_of_recordings != 0.0:
+            timestamp = float(line[0])
+            if detection_ts > timestamp > congestion_ts:
+                num_of_recordings += 1
+        if num_of_recordings != 0:
             avg = avg / num_of_recordings
         writer.writerow(["yes", congestion_ts, detection_ts, latency,
-                         (latency / TO_NANOSECONDS), avg])
+                         (latency / util.TO_NANOSECONDS), avg])
 
 
 def do_multiple_runs(platform, num_experiments, output_file):
@@ -462,31 +403,24 @@ def do_multiple_runs(platform, num_experiments, output_file):
                          "difference in seconds",
                          "average load between inducing and detecting congestion"])
         for _ in range(int(num_experiments)):
-            time.sleep(30)
+            time.sleep(15)
             # once everything has started, retrieve the necessary url info
-            cur_time = ns_to_timestamp(time.time() * TO_NANOSECONDS)
-            log.info("Injecting latency at time %s", cur_time)
+            congestion_ts = time.time() * util.TO_NANOSECONDS
+            log.info("Injecting latency at time %s",
+                     util.ns_to_timestamp(congestion_ts))
             inject_failure()
-            time.sleep(10)
-            log.info("Sending burst")
-            congestion_ts = int(time.time() * TO_NANOSECONDS)
-            log.info("Causing congestion at %s",
-                     ns_to_timestamp(congestion_ts))
-            do_burst(platform)
-            time.sleep(10)
-            cur_time = ns_to_timestamp(time.time() * TO_NANOSECONDS)
-            log.info("Removing latency at time %s", cur_time)
+            time.sleep(15)
+            log.info("Removing latency at time %s", util.nano_ts())
             remove_failure()
-            time.sleep(30)
-            cur_time = ns_to_timestamp(time.time() * TO_NANOSECONDS)
-            log.info("Done at time %s", cur_time)
+            time.sleep(15)
+            log.info("Done at time %s", util.nano_ts())
             # process results
             check_congestion(platform, writer, congestion_ts)
             # sleep long enough that the congestion times will not be mixed up
             time.sleep(5)
 
 
-def do_experiment(platform, multizonal, filter_name, num_experiments, output_file):
+def do_experiment(platform, num_experiments, output_file):
     if check_kubernetes_status() != util.EXIT_SUCCESS:
         log.error("Kubernetes is not set up."
                   " Did you run the deployment script?")
@@ -497,30 +431,26 @@ def do_experiment(platform, multizonal, filter_name, num_experiments, output_fil
     _ = util.exec_process(
         cmd, stdout=util.subprocess.PIPE, stderr=util.subprocess.PIPE)
 
-    if platform != "GCP":
-        # clean up any proc listening on 8090 just to be safe
-        cmd = "lsof -ti tcp:8090 | xargs kill || exit 0"
-        _ = util.exec_process(
-            cmd, stdout=util.subprocess.PIPE, stderr=util.subprocess.PIPE)
-    else:
-        setup_bookinfo_deployment(platform, multizonal)
-        wait_until_pods_ready(platform)
-        # prom_proc, prom_api = launch_prometheus()
-        log.info("Deploying filter")
-        deploy_filter(filter_name)
-        wait_until_pods_ready(platform)
+    # clean up any proc listening on 8090 just to be safe
+    cmd = "lsof -ti tcp:8090 | xargs kill || exit 0"
+    _ = util.exec_process(
+        cmd, stdout=util.subprocess.PIPE, stderr=util.subprocess.PIPE)
 
     # once everything has started, retrieve the necessary url info
     _, _, gateway_url = get_gateway_info(platform)
     # set up storage to query later
+    log.info("Forwarding storage port at time %s", util.nano_ts())
     storage_proc = launch_storage_mon()
-    cur_time = ns_to_timestamp(time.time() * TO_NANOSECONDS)
-    log.info("Running Fortio at time %s", cur_time)
+    # start fortio load generation
+    log.info("Running Fortio at time %s", util.nano_ts())
     fortio_proc = start_fortio(gateway_url)
+    # start Prometheus and wait a little to stabilize
+    log.info("Starting Prometheus monitor at time %s", util.nano_ts())
     prom_proc, prom_api = launch_prometheus()
     time.sleep(10)
     p = Process(target=query_csv_loop, args=(prom_api, ))
     p.start()
+
     do_multiple_runs(platform, num_experiments, output_file)
     log.info("Killing fortio")
     # terminate fortio by sending an interrupt to the process group
@@ -635,6 +565,7 @@ def handle_filter(args):
 
 
 def main(args):
+    # single commands to execute
     if args.setup:
         return setup_bookinfo_deployment(args.platform, args.multizonal)
     if args.deploy_bookinfo:
@@ -644,13 +575,19 @@ def main(args):
     handle_filter(args)
     if args.clean:
         return stop_kubernetes(args.platform)
-    if args.full_run:
-        setup_bookinfo_deployment(args.platform, args.multizonal)
     if args.burst:
         return do_burst(args.platform)
+
+    # experiment zone, experiments run after this point
+    if args.full_run:
+        result = setup_bookinfo_deployment(args.platform, args.multizonal)
+        if result != util.EXIT_SUCCESS:
+            return result
+        result = deploy_filter(args.filter_name)
+        if result != util.EXIT_SUCCESS:
+            return result
     # test the fault injection on an existing deployment
-    do_experiment(args.platform, args.multizonal, args.filter_name,
-                  args.num_experiments, args.output_file)
+    do_experiment(args.platform, args.num_experiments, args.output_file)
     if args.full_run:
         # all done with the test, clean up
         stop_kubernetes(args.platform)
