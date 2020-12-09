@@ -42,24 +42,21 @@ sudo apt update && sudo apt install bazel
 
 # need prometheus for the API
 pip3 install --user prometheus-api-client
-
 # download and unpack istio
-curl -L https://istio.io/downloadIstio | ISTIO_VERSION=1.8.0 TARGET_ARCH=x86_64 sh -
-
+curl -L https://istio.io/downloadIstio | \
+    ISTIO_VERSION=1.8.0 TARGET_ARCH=x86_64 sh -
 # create the bin directory
 mkdir -p bin
-
 # download the unpatched wasme
-wget  --output-document="bin/wasme" https://github.com/solo-io/wasm/releases/download/v0.0.32/wasme-linux-amd64
-
+wget  --output-document="bin/wasme" \
+https://github.com/solo-io/wasm/releases/download/v0.0.32/wasme-linux-amd64
 # build the patched wasme
 ./${FILE_DIR}/build_patched_wasme.sh
-
 # download fortio
 curl -L https://github.com/fortio/fortio/releases/download/v1.11.4/fortio-linux_x64-1.11.4.tgz \
  | tar --strip-components=2  -C bin usr/bin/fortio -xvzpf -
-
-
+# build the burst tool
+make -C tools/parallel_curl/
 
 ###### These are currently not needed
 
