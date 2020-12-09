@@ -53,12 +53,12 @@ def move_file(src, dst):
 
 
 def get_output_from_proc(cmd, *args, **kwargs):
-    log.info("Executing %s ", cmd)
+    log.debug("Executing %s ", cmd)
     return subprocess.check_output(cmd.split(), *args, **kwargs)
 
 
 def start_process(cmd, *args, out_file=subprocess.PIPE, **kwargs):
-    log.info("Executing %s ", cmd)
+    log.debug("Executing %s ", cmd)
     if out_file is subprocess.STDOUT:
         proc = subprocess.Popen(cmd.split(), *args, **kwargs)
     elif out_file is subprocess.PIPE:
@@ -74,7 +74,7 @@ def start_process(cmd, *args, out_file=subprocess.PIPE, **kwargs):
 
 
 def exec_process(cmd, *args, **kwargs):
-    log.info("Executing %s ", cmd)
+    log.debug("Executing %s ", cmd)
     result = subprocess.run(cmd, shell=True, *args, **kwargs)
     if result.stdout:
         log.debug("Process output: %s", result.stdout.decode("utf-8"))

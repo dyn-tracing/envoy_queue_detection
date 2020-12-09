@@ -6,10 +6,11 @@ import time
 import os
 import signal
 import csv
+from multiprocessing import Process
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 import requests
-from multiprocessing import Process
 
 from prometheus_api_client import PrometheusConnect
 
@@ -235,12 +236,18 @@ def setup_bookinfo_deployment(platform, multizonal):
     return result
 
 
-def cause_congestion(platform):
+def send_request(url, _num):
+    requests.get(url)
+
+
+def do_burst(platform):
+    NUM_REQUESTS = 500
     _, _, gateway_url = get_gateway_info(platform)
-    cmd = f"{TOOLS_DIR}/parallel_curl/pc {gateway_url}/productpage"
-    result = util.exec_process(
-        cmd, stdout=util.subprocess.PIPE, stderr=util.subprocess.PIPE)
-    return result
+    url = f"http://{gateway_url}/productpage"
+    # quick hack until I found a better way
+    with ThreadPoolExecutor(max_workers=32) as p:
+        for _ in p.map(lambda x: send_request(url, x), range(NUM_REQUESTS)):
+            pass
 
 
 def find_congestion(platform, starting_time):
@@ -407,14 +414,14 @@ def test_fault_injection(prom_api, platform):
     log.info("Cluster killed")
 
 
-def do_multiple_runs(platform, num_runs, output_file):
+def do_multiple_runs(platform, num_experiments, output_file):
     with open(output_file, "w+") as csvfile:
         writer = csv.writer(csvfile, delimiter=' ')
         writer.writerow(["found congestion?", "congestion started",
                          "congested detected",
                          "difference in nanoseconds",
                          "difference in seconds", "average load between inducing and detecting congestion"])
-        for _ in range(int(num_runs)):
+        for _ in range(int(num_experiments)):
             time.sleep(30)
             # once everything has started, retrieve the necessary url info
             cur_time = ns_to_timestamp(time.time() * TO_NANOSECONDS)
@@ -425,7 +432,7 @@ def do_multiple_runs(platform, num_runs, output_file):
             time_of_congestion = int(time.time() * TO_NANOSECONDS)
             log.info("Causing congestion at %s",
                      ns_to_timestamp(time_of_congestion))
-            cause_congestion(platform)
+            do_burst(platform)
             time.sleep(10)
             cur_time = ns_to_timestamp(time.time() * TO_NANOSECONDS)
             log.info("Removing latency at time %s", cur_time)
@@ -624,8 +631,8 @@ def main(args):
         return stop_kubernetes(args.platform)
     if args.full_run:
         setup_bookinfo_deployment(args.platform, args.multizonal)
-    if args.cause_congestion:
-        return cause_congestion(args.platform)
+    if args.burst:
+        return do_burst(args.platform)
     # test the fault injection on an existing deployment
     do_experiment(args.platform, args.multizonal, args.filter_name,
                   args.num_experiments, args.output_file)
@@ -652,7 +659,8 @@ if __name__ == '__main__':
                              "MK is minikube, GCP is Google Cloud Compute")
     parser.add_argument("-m", "--multi-zonal", dest="multizonal",
                         action="store_true",
-                        help="If you are running on GCP, do you want a multi-zone cluster?")
+                        help="If you are running on GCP,"
+                        " do you want a multi-zone cluster?")
     parser.add_argument("-f", "--full-run", dest="full_run",
                         action="store_true",
                         help="Whether to do a full run. "
@@ -693,15 +701,10 @@ if __name__ == '__main__':
     parser.add_argument("-fc", "--find-congestion", dest="find_congestion",
                         action="store_true",
                         help="Find congestion in the logs. ")
-    parser.add_argument("-cc", "--cause-congestion", dest="cause_congestion",
+    parser.add_argument("-b", "--burst", dest="burst",
                         action="store_true",
-                        help="Cause congestion/queue buildup. ")
-    parser.add_argument("-nr", "--num_runs", dest="num_runs",
-                        default=NUM_EXPERIMENTS,
-                        help="Number of times to cause congestion as a part of an experiment. ")
-    parser.add_argument("-mz", "--multizone", dest="multi_zonal",
-                        action="store_true",
-                        help="Make the cluster in multiple regions. ")
+                        help="Burst with HTTP requests to cause"
+                        " congestion and queue buildup.")
     parser.add_argument("-ne", "--num-experiments", dest="num_experiments",
                         default=NUM_EXPERIMENTS,
                         help="Number of times to run an experiment. ")
