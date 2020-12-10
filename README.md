@@ -21,24 +21,24 @@ TBD
 
 ## Setup
 Once everything is installed, the Kubernetes cluster can be started with
-`./fault_testing.py --setup`. This will take a couple minutes.
+`./kube_env.py --setup`. This will take a couple minutes.
 
-We provide a pre-built filter. It can be deployed with the `./fault_testing.py --filter-name webassemblyhub.io/fruffy/test-filter --deploy-filter ` command.
+We provide a pre-built filter. It can be deployed with the `./kube_env.py --filter-name webassemblyhub.io/fruffy/test-filter --deploy-filter ` command.
 We are currently working on a solution that deploys locally-built filters.
 
 ## Demo
-Once the filter has been successfully installed, it is possible to run experiments with  `./fault_testing.py --num-experiments 1`.
+Once the filter has been successfully installed, it is possible to run experiments with  `./run_experiments.py --num-experiments 1`.
 
 ## Teardown
 Remove the filter
 
-`./fault_testing.py --filter-name webassemblyhub.io/fruffy/test-filter --undeploy-filter`
+`./kube_env.py --filter-name webassemblyhub.io/fruffy/test-filter --undeploy-filter`
 
 Remove the bookinfo application
 
-`./fault_testing.py --remove-bookinfo`
+`./kube_env.py --remove-bookinfo`
 
 Tear down the cluster
 
-`./fault_testing.py --clean`
+`./kube_env.py --clean`
 
