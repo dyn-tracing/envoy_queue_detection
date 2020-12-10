@@ -100,3 +100,8 @@ def ns_to_timestamp(str_ns):
 
 def nano_ts():
     return ns_to_timestamp(time.time() * TO_NANOSECONDS)
+
+
+def kill_tcp_proc(port_num):
+    cmd = f"lsof -ti tcp:{port_num} | xargs kill || exit 0"
+    return exec_process(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)

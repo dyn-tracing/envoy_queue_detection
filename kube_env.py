@@ -4,14 +4,10 @@ import logging
 import sys
 import time
 import os
-import signal
-import csv
 from multiprocessing import Process
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import requests
-
-from prometheus_api_client import PrometheusConnect
 
 import util
 
@@ -30,9 +26,6 @@ FILTER_NAME = ""
 FILTER_DIR = FILE_DIR.joinpath("message_counter")
 FILTER_TAG = "1"
 FILTER_ID = "test"
-CONGESTION_PERIOD = 1607016396875512000
-OUTPUT_FILE = "output.csv"
-NUM_EXPERIMENTS = 1
 
 # the kubernetes python API sucks, but keep this for later
 
@@ -204,29 +197,6 @@ def get_gateway_info(platform):
     return ingress_host, ingress_port, gateway_url
 
 
-def start_fortio(gateway_url):
-    # cmd = "kubectl get pods -lapp=fortio -o jsonpath={.items[0].metadata.name}"
-    # fortio_pod_name = util.get_output_from_proc(cmd).decode("utf-8")
-    # cmd = f"kubectl exec {fortio_pod_name} -c fortio -- /usr/bin/fortio "
-    cmd = f"{FILE_DIR}/bin/fortio "
-    cmd += "load -c 50 -qps 500 -jitter -t 0 -loglevel Warning "
-    cmd += f"http://{gateway_url}/productpage"
-    fortio_proc = util.start_process(cmd, preexec_fn=os.setsid)
-    return fortio_proc
-
-
-def setup_bookinfo_deployment(platform, multizonal):
-    start_kubernetes(platform, multizonal)
-    result = inject_istio()
-    if result != util.EXIT_SUCCESS:
-        return result
-    result = deploy_bookinfo()
-    if result != util.EXIT_SUCCESS:
-        return result
-    result = deploy_addons()
-    return result
-
-
 def burst_loop(url):
     NUM_REQUESTS = 500
     MAX_THREADS = 32
@@ -254,213 +224,27 @@ def do_burst(platform):
     # do not care about killing that process
 
 
-def find_congestion(platform, start_time, congestion_ts):
-    if check_kubernetes_status() != util.EXIT_SUCCESS:
-        log.error("Kubernetes is not set up."
-                  " Did you run the deployment script?")
-        sys.exit(util.EXIT_FAILURE)
-    logs = query_storage(platform)
-    if not logs:
-        log.info("No congestion found!")
-        return None
-    # we want to make sure we aren't recording anything earlier
-    # than our starting time. That wouldn't make sense
-    ival_start = -1
-    ival_end = -1
-    for idx, (time_stamp, _) in enumerate(logs):
-        if (int(time_stamp) - start_time) > congestion_ts:
-            ival_start = idx
-            break
-    for idx, (time_stamp, _) in enumerate(logs):
-        if (int(time_stamp) - start_time) > (congestion_ts + CONGESTION_PERIOD):
-            ival_end = idx
-            break
-    log_slice = logs[ival_start:ival_end]
-    congestion_dict = {}
-    for idx, (time_stamp, service_name) in enumerate(log_slice):
-        congestion_dict[service_name] = int(time_stamp) - start_time
-        # we have congestion at more than 1 service
-        if len(congestion_dict) > 1:
-            for congested_service, service_ts in congestion_dict.items():
-                congestion_ts_str = util.ns_to_timestamp(service_ts)
-                log_str = (f"Congestion at {congested_service} "
-                           f"at time {congestion_ts_str}")
-                log.info(log_str)
-            return min(congestion_dict.values())
-
-    log.info("No congestion found")
-    return None
+def start_fortio(gateway_url):
+    # cmd = "kubectl get pods -lapp=fortio -o jsonpath={.items[0].metadata.name}"
+    # fortio_pod_name = util.get_output_from_proc(cmd).decode("utf-8")
+    # cmd = f"kubectl exec {fortio_pod_name} -c fortio -- /usr/bin/fortio "
+    cmd = f"{FILE_DIR}/bin/fortio "
+    cmd += "load -c 50 -qps 500 -jitter -t 0 -loglevel Warning "
+    cmd += f"http://{gateway_url}/productpage"
+    fortio_proc = util.start_process(cmd, preexec_fn=os.setsid)
+    return fortio_proc
 
 
-def query_storage(platform):
-    if platform == "GCP":
-        time.sleep(10)  # wait for logs to come in
-        logs = []
-        cmd = f"{TOOLS_DIR}/logs_script.sh"
-        output = util.get_output_from_proc(cmd).decode("utf-8").split("\n")
-        for line in output:
-            if "Stored" in line:
-                line = line[line.find("Stored"):]  # get right after timestamp
-                line = line.split()
-                timestamp = line[1]
-                name = line[-1]
-                logs.append([timestamp, name])
-    else:
-        storage_content = requests.get("http://localhost:8090/list")
-        output = storage_content.text.split("\n")
-        logs = []
-        for line in output:
-            if "->" in line:
-                line_time, line_name = line.split("->")
-                logs.append([line_time, line_name])
-    return sorted(logs, key=lambda tup: tup[0])
-
-
-def launch_prometheus():
-    if check_kubernetes_status() != util.EXIT_SUCCESS:
-        log.error("Kubernetes is not set up."
-                  " Did you run the deployment script?")
-        sys.exit(util.EXIT_FAILURE)
-    cmd = "kubectl get pods -n istio-system -lapp=prometheus "
-    cmd += " -o jsonpath={.items[0].metadata.name}"
-    prom_pod_name = util.get_output_from_proc(cmd).decode("utf-8")
-    cmd = f"kubectl port-forward -n istio-system {prom_pod_name} 9090"
-    prom_proc = util.start_process(cmd, preexec_fn=os.setsid)
-    time.sleep(2)
-    prom_api = PrometheusConnect(url="http://localhost:9090", disable_ssl=True)
-
-    return prom_proc, prom_api
-
-
-def launch_storage_mon():
-    if check_kubernetes_status() != util.EXIT_SUCCESS:
-        log.error("Kubernetes is not set up."
-                  " Did you run the deployment script?")
-        sys.exit(util.EXIT_FAILURE)
-    cmd = "kubectl get pods -lapp=storage-upstream "
-    cmd += " -o jsonpath={.items[0].metadata.name}"
-    storage_pod_name = util.get_output_from_proc(cmd).decode("utf-8")
-    cmd = f"kubectl port-forward {storage_pod_name} 8090:8080"
-    storage_proc = util.start_process(cmd, preexec_fn=os.setsid)
-    # Let settle things in a bit
-    time.sleep(2)
-
-    return storage_proc
-
-
-def query_csv_loop(prom_api, start_time):
-    with open("prom.csv", "w+") as csvfile:
-        writer = csv.writer(csvfile, delimiter=',')
-        writer.writerow(["Time", "RPS"])
-        while True:
-            query = prom_api.custom_query(
-                query="(histogram_quantile(0.50, sum(irate(istio_request_duration_milliseconds_bucket{reporter=\"source\",destination_service=~\"productpage.default.svc.cluster.local\"}[1m])) by (le)) / 1000) or histogram_quantile(0.50, sum(irate(istio_request_duration_seconds_bucket{reporter=\"source\",destination_service=~\"productpage.default.svc.cluster.local\"}[1m])) by (le))")
-            for q in query:
-                query_ts, latency = q["value"]
-                latency = float(latency) * 1000
-                query_ns = (query_ts * util.TO_NANOSECONDS) - start_time
-                log.info("Time: %s 50pct Latency (ms) %s",
-                         util.ns_to_timestamp(query_ns), latency)
-                writer.writerow([query_ns, latency])
-                csvfile.flush()
-            time.sleep(1)
-
-
-def check_congestion(platform, writer, start_time, congestion_ts):
-    detection_ts = find_congestion(platform, start_time, congestion_ts)
-    if detection_ts is None:
-        writer.writerow(["no", "." * 5])
-        return
-    log.info("Injected latency at %s recorded queues at %s",
-             util.ns_to_timestamp(congestion_ts), util.ns_to_timestamp(detection_ts))
-    latency = (int(detection_ts) - int(congestion_ts))
-    log.info("Latency between sending and recording in storage is %s seconds",
-             (latency / util.TO_NANOSECONDS))
-    with open("prom.csv", "r") as prom:
-        avg = 0
-        num_of_recordings = 0
-        read = csv.reader(prom)
-        next(read, None)  # skip the headers
-        for line in read:
-            timestamp = float(line[0])
-            if detection_ts > timestamp > congestion_ts:
-                num_of_recordings += 1
-        if num_of_recordings != 0:
-            avg = avg / num_of_recordings
-        writer.writerow(["yes", congestion_ts, detection_ts, latency,
-                         (latency / util.TO_NANOSECONDS), avg])
-
-
-def do_multiple_runs(platform, num_experiments, output_file):
-    with open(output_file, "w+") as csvfile:
-        writer = csv.writer(csvfile, delimiter=' ')
-        writer.writerow(["found congestion?", "congestion started",
-                         "congested detected",
-                         "difference in nanoseconds",
-                         "difference in seconds",
-                         "average load between inducing and detecting congestion"])
-        # start Prometheus and wait a little to stabilize
-        log.info("Forwarding Prometheus port at time %s", util.nano_ts())
-        prom_proc, prom_api = launch_prometheus()
-        for _ in range(int(num_experiments)):
-            start_time = time.time() * util.TO_NANOSECONDS
-
-            query_proc = Process(target=query_csv_loop,
-                                 args=(prom_api, start_time,))
-            query_proc.start()
-            time.sleep(15)
-            # once everything has started, retrieve the necessary url info
-            congestion_ts = time.time() * util.TO_NANOSECONDS - start_time
-            log.info("Injecting latency at time %s",
-                     util.ns_to_timestamp(congestion_ts))
-            inject_failure()
-            time.sleep(15)
-            log.info("Removing latency at time %s", util.nano_ts())
-            remove_failure()
-            time.sleep(15)
-            log.info("Done at time %s", util.nano_ts())
-            # process results
-            check_congestion(platform, writer, start_time, congestion_ts)
-            # kill prometheus
-            log.info("Terminating prometheus loop")
-            query_proc.terminate()
-            # sleep long enough that the congestion times will not be mixed up
-            time.sleep(5)
-        os.killpg(os.getpgid(prom_proc.pid), signal.SIGINT)
-
-def do_experiment(platform, num_experiments, output_file):
-    if check_kubernetes_status() != util.EXIT_SUCCESS:
-        log.error("Kubernetes is not set up."
-                  " Did you run the deployment script?")
-        sys.exit(util.EXIT_FAILURE)
-
-    # clean up any proc listening on 9090 just to be safe
-    cmd = "lsof -ti tcp:9090 | xargs kill || exit 0"
-    _ = util.exec_process(
-        cmd, stdout=util.subprocess.PIPE, stderr=util.subprocess.PIPE)
-
-    # clean up any proc listening on 8090 just to be safe
-    cmd = "lsof -ti tcp:8090 | xargs kill || exit 0"
-    _ = util.exec_process(
-        cmd, stdout=util.subprocess.PIPE, stderr=util.subprocess.PIPE)
-
-    # once everything has started, retrieve the necessary url info
-    _, _, gateway_url = get_gateway_info(platform)
-    # set up storage to query later
-    log.info("Forwarding storage port at time %s", util.nano_ts())
-    storage_proc = launch_storage_mon()
-    # start fortio load generation
-    log.info("Running Fortio at time %s", util.nano_ts())
-    fortio_proc = start_fortio(gateway_url)
-    time.sleep(5)
-
-    do_multiple_runs(platform, num_experiments, output_file)
-    log.info("Killing fortio")
-    # terminate fortio by sending an interrupt to the process group
-    os.killpg(os.getpgid(fortio_proc.pid), signal.SIGINT)
-    # kill the storage proc after the query
-    log.info("Killing storage")
-    os.killpg(os.getpgid(storage_proc.pid), signal.SIGINT)
+def setup_bookinfo_deployment(platform, multizonal):
+    start_kubernetes(platform, multizonal)
+    result = inject_istio()
+    if result != util.EXIT_SUCCESS:
+        return result
+    result = deploy_bookinfo()
+    if result != util.EXIT_SUCCESS:
+        return result
+    result = deploy_addons()
+    return result
 
 
 def build_filter(filter_dir, filter_name):
@@ -540,27 +324,20 @@ def refresh_filter(filter_dir, filter_name):
 
 
 def handle_filter(args):
-    is_filter_related = args.build_filter or args.deploy_filter
-    is_filter_related = is_filter_related or args.undeploy_filter
-    is_filter_related = is_filter_related or args.refresh_filter
-    if not is_filter_related:
-        return
     if not args.filter_name:
         log.error("The filter name is required to deploy filters with wasme. "
                   "You can set it with the -fn or --filter-name argument.")
-        sys.exit(util.EXIT_FAILURE)
+        return util.EXIT_FAILURE
     if args.build_filter:
-        result = build_filter(args.filter_dir, args.filter_name)
-        sys.exit(result)
+        return build_filter(args.filter_dir, args.filter_name)
     if args.deploy_filter:
-        result = deploy_filter(args.filter_name)
-        sys.exit(result)
+        return deploy_filter(args.filter_name)
     if args.undeploy_filter:
-        result = undeploy_filter(args.filter_name)
-        sys.exit(result)
+        return undeploy_filter(args.filter_name)
     if args.refresh_filter:
-        result = refresh_filter(args.filter_dir, args.filter_name)
-        sys.exit(result)
+        return refresh_filter(args.filter_dir, args.filter_name)
+    log.warning("No command line input provided. Do nothing.")
+    return util.EXIT_SUCCESS
 
 
 def main(args):
@@ -571,26 +348,11 @@ def main(args):
         return deploy_bookinfo()
     if args.remove_bookinfo:
         return remove_bookinfo()
-    handle_filter(args)
     if args.clean:
         return stop_kubernetes(args.platform)
     if args.burst:
         return do_burst(args.platform)
-
-    # experiment zone, experiments run after this point
-    if args.full_run:
-        result = setup_bookinfo_deployment(args.platform, args.multizonal)
-        if result != util.EXIT_SUCCESS:
-            return result
-        result = deploy_filter(args.filter_name)
-        if result != util.EXIT_SUCCESS:
-            return result
-    # test the fault injection on an existing deployment
-    do_experiment(args.platform, args.num_experiments, args.output_file)
-    if args.full_run:
-        # all done with the test, clean up
-        stop_kubernetes(args.platform)
-    return util.EXIT_SUCCESS
+    return handle_filter(args)
 
 
 if __name__ == '__main__':
@@ -612,11 +374,6 @@ if __name__ == '__main__':
                         action="store_true",
                         help="If you are running on GCP,"
                         " do you want a multi-zone cluster?")
-    parser.add_argument("-f", "--full-run", dest="full_run",
-                        action="store_true",
-                        help="Whether to do a full run. "
-                        "This includes setting up bookinfo and Kubernetes"
-                        " and tearing it down again.")
     parser.add_argument("-s", "--setup", dest="setup",
                         action="store_true",
                         help="Just do a deployment. "
@@ -649,19 +406,10 @@ if __name__ == '__main__':
     parser.add_argument("-rf", "--refresh-filter", dest="refresh_filter",
                         action="store_true",
                         help="Refresh the WASME filter. ")
-    parser.add_argument("-fc", "--find-congestion", dest="find_congestion",
-                        action="store_true",
-                        help="Find congestion in the logs. ")
     parser.add_argument("-b", "--burst", dest="burst",
                         action="store_true",
                         help="Burst with HTTP requests to cause"
                         " congestion and queue buildup.")
-    parser.add_argument("-ne", "--num-experiments", dest="num_experiments",
-                        default=NUM_EXPERIMENTS,
-                        help="Number of times to run an experiment. ")
-    parser.add_argument("-o", "--output_file", dest="output_file",
-                        default=OUTPUT_FILE,
-                        help="Where to store the results of the experiments. ")
     # Parse options and process argv
     arguments = parser.parse_args()
     # configure logging
