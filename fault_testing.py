@@ -254,14 +254,12 @@ def do_burst(platform):
     # do not care about killing that process
 
 
-def find_congestion(platform, starting_time):
+def find_congestion(platform, start_time, congestion_ts):
     if check_kubernetes_status() != util.EXIT_SUCCESS:
         log.error("Kubernetes is not set up."
                   " Did you run the deployment script?")
         sys.exit(util.EXIT_FAILURE)
     logs = query_storage(platform)
-    if logs == []:
-        return None
     if not logs:
         log.info("No congestion found!")
         return None
@@ -270,22 +268,22 @@ def find_congestion(platform, starting_time):
     ival_start = -1
     ival_end = -1
     for idx, (time_stamp, _) in enumerate(logs):
-        if int(time_stamp) > starting_time:
+        if (int(time_stamp) - start_time) > congestion_ts:
             ival_start = idx
             break
     for idx, (time_stamp, _) in enumerate(logs):
-        if int(time_stamp) > (starting_time + CONGESTION_PERIOD):
+        if (int(time_stamp) - start_time) > (congestion_ts + CONGESTION_PERIOD):
             ival_end = idx
             break
     log_slice = logs[ival_start:ival_end]
     congestion_dict = {}
     for idx, (time_stamp, service_name) in enumerate(log_slice):
-        congestion_dict[service_name] = int(time_stamp)
+        congestion_dict[service_name] = int(time_stamp) - start_time
         # we have congestion at more than 1 service
         if len(congestion_dict) > 1:
-            for congested_service, congestion_ts in congestion_dict.items():
-                congestion_ts_str = util.ns_to_timestamp(congestion_ts)
-                log_str = (f"Congestion at {congested_service}"
+            for congested_service, service_ts in congestion_dict.items():
+                congestion_ts_str = util.ns_to_timestamp(service_ts)
+                log_str = (f"Congestion at {congested_service} "
                            f"at time {congestion_ts_str}")
                 log.info(log_str)
             return min(congestion_dict.values())
@@ -350,7 +348,7 @@ def launch_storage_mon():
     return storage_proc
 
 
-def query_csv_loop(prom_api):
+def query_csv_loop(prom_api, start_time):
     with open("prom.csv", "w+") as csvfile:
         writer = csv.writer(csvfile, delimiter=',')
         writer.writerow(["Time", "RPS"])
@@ -358,23 +356,22 @@ def query_csv_loop(prom_api):
             query = prom_api.custom_query(
                 query="(histogram_quantile(0.50, sum(irate(istio_request_duration_milliseconds_bucket{reporter=\"source\",destination_service=~\"productpage.default.svc.cluster.local\"}[1m])) by (le)) / 1000) or histogram_quantile(0.50, sum(irate(istio_request_duration_seconds_bucket{reporter=\"source\",destination_service=~\"productpage.default.svc.cluster.local\"}[1m])) by (le))")
             for q in query:
-                val = q["value"]
-                latency = float(val[1]) * 1000
-                query_time = util.datetime.fromtimestamp(val[0])
-                log.info("Time: %s 50pct Latency (ms) %s", query_time, latency)
-                query_ns = f"{val[0] * util.TO_NANOSECONDS:.7f}"
+                query_ts, latency = q["value"]
+                latency = float(latency) * 1000
+                query_ns = (query_ts * util.TO_NANOSECONDS) - start_time
+                log.info("Time: %s 50pct Latency (ms) %s",
+                         util.ns_to_timestamp(query_ns), latency)
                 writer.writerow([query_ns, latency])
                 csvfile.flush()
             time.sleep(1)
 
 
-def check_congestion(platform, writer, congestion_ts):
-    detection_ts = find_congestion(platform, congestion_ts)
+def check_congestion(platform, writer, start_time, congestion_ts):
+    detection_ts = find_congestion(platform, start_time, congestion_ts)
     if detection_ts is None:
         writer.writerow(["no", "." * 5])
-        log.info("No congestion caused")
         return
-    log.info("Sent burst at %s recorded it at %s",
+    log.info("Injected latency at %s recorded queues at %s",
              util.ns_to_timestamp(congestion_ts), util.ns_to_timestamp(detection_ts))
     latency = (int(detection_ts) - int(congestion_ts))
     log.info("Latency between sending and recording in storage is %s seconds",
@@ -402,10 +399,18 @@ def do_multiple_runs(platform, num_experiments, output_file):
                          "difference in nanoseconds",
                          "difference in seconds",
                          "average load between inducing and detecting congestion"])
+        # start Prometheus and wait a little to stabilize
+        log.info("Forwarding Prometheus port at time %s", util.nano_ts())
+        prom_proc, prom_api = launch_prometheus()
         for _ in range(int(num_experiments)):
+            start_time = time.time() * util.TO_NANOSECONDS
+
+            query_proc = Process(target=query_csv_loop,
+                                 args=(prom_api, start_time,))
+            query_proc.start()
             time.sleep(15)
             # once everything has started, retrieve the necessary url info
-            congestion_ts = time.time() * util.TO_NANOSECONDS
+            congestion_ts = time.time() * util.TO_NANOSECONDS - start_time
             log.info("Injecting latency at time %s",
                      util.ns_to_timestamp(congestion_ts))
             inject_failure()
@@ -415,10 +420,13 @@ def do_multiple_runs(platform, num_experiments, output_file):
             time.sleep(15)
             log.info("Done at time %s", util.nano_ts())
             # process results
-            check_congestion(platform, writer, congestion_ts)
+            check_congestion(platform, writer, start_time, congestion_ts)
+            # kill prometheus
+            log.info("Terminating prometheus loop")
+            query_proc.terminate()
             # sleep long enough that the congestion times will not be mixed up
             time.sleep(5)
-
+        os.killpg(os.getpgid(prom_proc.pid), signal.SIGINT)
 
 def do_experiment(platform, num_experiments, output_file):
     if check_kubernetes_status() != util.EXIT_SUCCESS:
@@ -444,12 +452,7 @@ def do_experiment(platform, num_experiments, output_file):
     # start fortio load generation
     log.info("Running Fortio at time %s", util.nano_ts())
     fortio_proc = start_fortio(gateway_url)
-    # start Prometheus and wait a little to stabilize
-    log.info("Starting Prometheus monitor at time %s", util.nano_ts())
-    prom_proc, prom_api = launch_prometheus()
-    time.sleep(10)
-    p = Process(target=query_csv_loop, args=(prom_api, ))
-    p.start()
+    time.sleep(5)
 
     do_multiple_runs(platform, num_experiments, output_file)
     log.info("Killing fortio")
@@ -458,10 +461,6 @@ def do_experiment(platform, num_experiments, output_file):
     # kill the storage proc after the query
     log.info("Killing storage")
     os.killpg(os.getpgid(storage_proc.pid), signal.SIGINT)
-    # kill prometheus
-    log.info("Killing prometheus.")
-    p.terminate()
-    os.killpg(os.getpgid(prom_proc.pid), signal.SIGINT)
 
 
 def build_filter(filter_dir, filter_name):
@@ -608,7 +607,7 @@ if __name__ == '__main__':
                         default="KB",
                         choices=["MK", "GCP"],
                         help="Which platform to run the scripts on."
-                             "MK is minikube, GCP is Google Cloud Compute")
+                        "MK is minikube, GCP is Google Cloud Compute")
     parser.add_argument("-m", "--multi-zonal", dest="multizonal",
                         action="store_true",
                         help="If you are running on GCP,"
