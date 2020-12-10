@@ -98,8 +98,8 @@ def ns_to_timestamp(str_ns):
     return f"{dt.strftime('%H:%M:%S.%f')}.{(ns % 1e3):03.0f}"
 
 
-def nano_ts():
-    return ns_to_timestamp(time.time() * TO_NANOSECONDS)
+def nano_ts(offset=0):
+    return ns_to_timestamp((time.time() * TO_NANOSECONDS) - offset)
 
 
 def kill_tcp_proc(port_num):

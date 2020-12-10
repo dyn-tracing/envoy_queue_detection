@@ -2,3 +2,4 @@ istio-1.8.0
 *.log
 __pycache__/
 bin/
+results/
