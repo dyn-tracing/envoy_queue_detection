@@ -101,12 +101,9 @@ def deploy_bookinfo():
     book_cmd = f"{apply_cmd} {bookinfo_dir}"
     cmd = f"{apply_cmd} {YAML_DIR}/bookinfo-mod.yaml && "
     cmd += f"{book_cmd}/networking/bookinfo-gateway.yaml && "
-    cmd += f"{book_cmd}/networking/destination-rule-all.yaml && "
-    cmd += f"{book_cmd}/networking/destination-rule-all-mtls.yaml && "
+    cmd += f"{book_cmd}/networking/destination-rule-reviews.yaml && "
     cmd += f"{apply_cmd} {YAML_DIR}/storage-upstream.yaml && "
     cmd += f"{apply_cmd} {YAML_DIR}/productpage-cluster.yaml "
-    # disable this and use the non-container version of fortio
-    # cmd += f"{apply_cmd}/../httpbin/sample-client/fortio-deploy.yaml "
     result = util.exec_process(cmd)
     bookinfo_wait()
     return result
@@ -225,11 +222,8 @@ def do_burst(platform):
 
 
 def start_fortio(gateway_url):
-    # cmd = "kubectl get pods -lapp=fortio -o jsonpath={.items[0].metadata.name}"
-    # fortio_pod_name = util.get_output_from_proc(cmd).decode("utf-8")
-    # cmd = f"kubectl exec {fortio_pod_name} -c fortio -- /usr/bin/fortio "
     cmd = f"{FILE_DIR}/bin/fortio "
-    cmd += "load -c 50 -qps 500 -jitter -t 0 -loglevel Warning "
+    cmd += "load -c 50 -qps 300 -jitter -t 0 -loglevel Warning "
     cmd += f"http://{gateway_url}/productpage"
     fortio_proc = util.start_process(cmd, preexec_fn=os.setsid)
     return fortio_proc

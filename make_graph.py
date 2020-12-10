@@ -70,22 +70,25 @@ def make_graph(input_folder):
     prom_frame = prom_dfs[0]
     for merge_prom_frame in prom_dfs[1:]:
         prom_frame = pd.merge_asof(prom_frame, merge_prom_frame,
-                                   on="Time", direction="nearest")
+                                   on="Time", direction="backward")
     prom_frame = prom_frame.set_index("Time")
     prom_frame = prom_frame.mean(axis=1)
 
     stats_files = input_folder.glob("stats_*.csv")
     stats_dfs = []
     for stats_f in stats_files:
-        df = pd.read_csv(stats_f, usecols=["congestion started",
-                                           "congested detected"])
-        stats_dfs.append(df)
+        df = pd.read_csv(stats_f)
+        df = df[df["is_congested"] == "yes"]
+        df = df[["ccongestion_start", "congestion_detected", "congestion_cleared"]]
+        if not df.empty:
+            stats_dfs.append(df)
     stats_frame = pd.concat(stats_dfs)
     stats_frame.reset_index(drop=True, inplace=True)
     stats_frame = stats_frame.mean()
     ax = sns.lineplot(data=prom_frame)
     ax.axvline(stats_frame[0], color="red")
     ax.axvline(stats_frame[1], color="green")
+    ax.axvline(stats_frame[2], color="red")
     plt.savefig("test.png")
 
 

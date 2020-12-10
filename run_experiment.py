@@ -40,19 +40,16 @@ def find_congestion(platform, start_time, congestion_ts):
                   " Did you run the deployment script?")
         sys.exit(util.EXIT_FAILURE)
     logs = query_storage(platform)
-    if not logs:
-        log.info("No congestion found!")
-        return None
     # we want to make sure we aren't recording anything earlier
     # than our starting time. That wouldn't make sense
     ival_start = -1
     ival_end = -1
     for idx, (time_stamp, _) in enumerate(logs):
-        if (int(time_stamp) - start_time) > congestion_ts:
+        if (int(time_stamp) - start_time) >= congestion_ts:
             ival_start = idx
             break
     for idx, (time_stamp, _) in enumerate(logs):
-        if (int(time_stamp) - start_time) > (congestion_ts + CONGESTION_PERIOD):
+        if (int(time_stamp) - start_time) >= (congestion_ts + CONGESTION_PERIOD):
             ival_end = idx
             break
     log_slice = logs[ival_start:ival_end]
@@ -132,29 +129,28 @@ def query_csv_loop(results_dir, prom_api, idx, start_time):
     prom_file = results_dir.joinpath(f"prom_{idx}.csv")
     csvfile = open(prom_file, "w+")
     writer = csv.writer(csvfile, delimiter=',')
-    writer.writerow(["Time", "RPS"])
+    writer.writerow(["Time", "Latency"])
     while True:
         query = prom_api.custom_query(
-            query="(histogram_quantile(0.50, sum(irate(istio_request_duration_milliseconds_bucket{reporter=\"source\",destination_service=~\"productpage.default.svc.cluster.local\"}[1m])) by (le)) / 1000) or histogram_quantile(0.50, sum(irate(istio_request_duration_seconds_bucket{reporter=\"source\",destination_service=~\"productpage.default.svc.cluster.local\"}[1m])) by (le))")
+            query="(histogram_quantile(0.90, sum(irate(istio_request_duration_milliseconds_bucket{reporter=\"source\",destination_service=~\"productpage.default.svc.cluster.local\"}[1m])) by (le)) / 1000) or histogram_quantile(0.90, sum(irate(istio_request_duration_seconds_bucket{reporter=\"source\",destination_service=~\"productpage.default.svc.cluster.local\"}[1m])) by (le))")
         for q in query:
             query_ts, latency = q["value"]
             latency = float(latency) * 1000
             query_ns = (query_ts * util.TO_NANOSECONDS) - start_time
-            log.info("Time: %s 50pct Latency (ms) %s",
+            log.info("Time: %s 90pct Latency (ms) %s",
                      util.ns_to_timestamp(query_ns), latency)
             writer.writerow([query_ns, latency])
             csvfile.flush()
         time.sleep(1)
 
 
-def check_congestion(platform, test_dir, idx, start_time, congestion_ts):
+def check_congestion(platform, test_dir, idx, timestamps):
+    start_time, congestion_ts, clear_ts = timestamps
     # open the csv file for writing
     out_file = test_dir.joinpath(f"stats_{idx}.csv")
-    csv_header = ["found congestion?", "congestion started",
-                  "congested detected",
-                  "difference in nanoseconds",
-                  "difference in seconds",
-                  "average load between inducing and detecting congestion"]
+    csv_header = ["is_congested", "ccongestion_start",
+                  "congestion_detected", "congestion_cleared",
+                  "delta_ns", "delta_s", "lat_avg"]
     csvfile = open(out_file, "w+")
     writer = csv.writer(csvfile, delimiter=',')
     writer.writerow(csv_header)
@@ -182,7 +178,7 @@ def check_congestion(platform, test_dir, idx, start_time, congestion_ts):
     #             num_of_recordings += 1
     #     if num_of_recordings != 0:
     #         avg = avg / num_of_recordings
-    writer.writerow(["yes", congestion_ts, detection_ts, latency,
+    writer.writerow(["yes", congestion_ts, detection_ts, clear_ts, latency,
                      (latency / util.TO_NANOSECONDS), 0])
     csvfile.close()
 
@@ -193,27 +189,28 @@ def do_multiple_runs(platform, num_experiments, test_dir):
     prom_proc, prom_api = launch_prometheus()
     for idx in range(int(num_experiments)):
         start_time = time.time() * util.TO_NANOSECONDS
+        log.info("Starting prometheus loop")
         query_proc = Process(target=query_csv_loop,
                              args=(test_dir, prom_api, idx, start_time,))
         query_proc.start()
-        time.sleep(15)
-        # once everything has started, retrieve the necessary url info
+        log.info("Waiting a little for things to settle in...")
+        time.sleep(20)
         congestion_ts = time.time() * util.TO_NANOSECONDS - start_time
         log.info("Injecting latency at time %s",
                  util.ns_to_timestamp(congestion_ts))
         kube_env.inject_failure()
-        time.sleep(15)
-        log.info("Removing latency at time %s", util.nano_ts(start_time))
+        time.sleep(20)
+        clear_ts = time.time() * util.TO_NANOSECONDS - start_time
+        log.info("Removing latency at time %s", util.ns_to_timestamp(clear_ts))
         kube_env.remove_failure()
-        time.sleep(15)
+        time.sleep(20)
         log.info("Done at time %s", util.nano_ts(start_time))
         # process results
-        check_congestion(platform, test_dir, idx, start_time, congestion_ts)
+        timestamps = (start_time, congestion_ts, clear_ts)
+        check_congestion(platform, test_dir, idx, timestamps)
         # kill prometheus
         log.info("Terminating prometheus loop")
         query_proc.terminate()
-        # sleep long enough that the congestion times will not be mixed up
-        time.sleep(5)
     os.killpg(os.getpgid(prom_proc.pid), signal.SIGINT)
 
 
@@ -233,12 +230,12 @@ def do_experiment(platform, num_experiments, results_dir):
     # once everything has started, retrieve the necessary url info
     _, _, gateway_url = kube_env.get_gateway_info(platform)
     # set up storage to query later
-    log.info("Forwarding storage port at time %s", util.nano_ts())
+    log.info("Forwarding storage port")
     storage_proc = launch_storage_mon()
     # start fortio load generation
     log.info("Running Fortio")
     fortio_proc = kube_env.start_fortio(gateway_url)
-    time.sleep(5)
+    time.sleep(10)
     do_multiple_runs(platform, num_experiments, test_dir)
     log.info("Killing fortio")
     # terminate fortio by sending an interrupt to the process group
