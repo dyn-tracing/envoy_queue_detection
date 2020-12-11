@@ -148,7 +148,7 @@ def check_congestion(platform, test_dir, idx, timestamps):
     start_time, congestion_ts, clear_ts = timestamps
     # open the csv file for writing
     out_file = test_dir.joinpath(f"stats_{idx}.csv")
-    csv_header = ["is_congested", "ccongestion_start",
+    csv_header = ["is_congested", "congestion_start",
                   "congestion_detected", "congestion_cleared",
                   "delta_ns", "delta_s", "lat_avg"]
     csvfile = open(out_file, "w+")
