@@ -3,3 +3,4 @@ istio-1.8.0
 __pycache__/
 bin/
 results/
+plots/

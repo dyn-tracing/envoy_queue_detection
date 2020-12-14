@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
+import sys
 import argparse
-import csv
 import logging
 from pathlib import Path
-import numpy as np
+import matplotlib.ticker as ticker
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -15,52 +15,8 @@ log = logging.getLogger(__name__)
 
 FILE_DIR = Path(__file__).parent.resolve()
 RESULT_DIR = FILE_DIR.joinpath("results")
+PLOT_DIR = FILE_DIR.joinpath("plots")
 INPUT_FOLDER = RESULT_DIR.joinpath("run_0")
-MAX = 5
-
-
-def make_graph_old(input_file, title):
-    data = []
-    valid_data = 0
-    total_data = 0
-    dividers = np.linspace(0, MAX, MAX * 10 + 1).tolist()
-    for idx, div in enumerate(dividers):
-        dividers[idx] = round(div, 1)
-
-    divider_to_index = {}
-    for idx, div in enumerate(dividers):
-        divider_to_index[idx] = idx
-
-    with open(input_file) as file:
-        reader = csv.reader(file)
-        for row in reader:
-            row = row[-1].split()
-            if "seconds" not in row[-1]:
-                total_data += 1
-                if "...." not in row[-1]:  # this is a valid latency
-                    valid_data += 1
-                    data.append(float(row[-1]))  # only add latency in seconds
-    data = pd.DataFrame(data)
-    binned_data = pd.cut(data[0], bins=dividers)
-
-    data_to_graph = []
-    for datapoint in binned_data:
-        data_to_graph.append(datapoint.left)
-    data_to_graph = pd.DataFrame(data_to_graph)
-    f, ax = plt.subplots(figsize=(7, 5))
-    sns.despine(f)
-
-    sns.histplot(
-        data_to_graph,
-        palette="muted",
-        legend=False
-    )
-    ax.set(xlabel="Latency", ylabel="Number of Runs")
-    ax.set_xticks(np.linspace(0, MAX, MAX).tolist())
-    ax.set_facecolor("xkcd:light grey")
-    ax.set_title(title)
-    plt.savefig("test.png")
-    plt.show()
 
 
 def create_prom_data(input_folder, use_error_bars=False):
@@ -72,9 +28,9 @@ def create_prom_data(input_folder, use_error_bars=False):
 
     if not prom_dfs:
         log.error("No input data! Exiting...")
-        exit(util.EXIT_FAILURE)
+        sys.exit(util.EXIT_FAILURE)
     if use_error_bars:
-        prom_frame = pd.concat(prom_dfs, axis=1).fillna(method='ffill')
+        prom_frame = pd.concat(prom_dfs, axis=1).fillna(method="ffill")
         prom_frame = prom_frame.melt(ignore_index=False, value_name="Lat")
         prom_frame = prom_frame.drop("variable", 1)
     else:
@@ -88,7 +44,6 @@ def create_prom_data(input_folder, use_error_bars=False):
     # some manual adjustments needed
     prom_frame.columns = ["Latency"]
     prom_frame.index = pd.to_datetime(prom_frame.index.astype(int), unit="ns")
-    log.info(prom_frame)
     return prom_frame
 
 
@@ -103,18 +58,13 @@ def create_stats_data(input_folder):
     return stats_frame
 
 
-def make_graph(input_folder, use_error_bars):
-    # Set seaborn style for plotting
-    sns.set(style="whitegrid", rc={"lines.linewidth": 2.0,
-                                   "axes.spines.right": False,
-                                   "axes.spines.top": False,
-                                   'lines.markeredgewidth': 0.1})
+def make_line_graph(input_folder, use_error_bars):
     prom_frame = create_prom_data(input_folder, use_error_bars)
     stats_frame = create_stats_data(input_folder)
     c_start = stats_frame["congestion_start"].astype("datetime64[ns]")
     c_dect = stats_frame["congestion_detected"].astype("datetime64[ns]")
     c_cleared = stats_frame["congestion_cleared"].astype("datetime64[ns]")
-    fig, ax = plt.subplots(figsize=(10, 4), squeeze=True)
+    _, ax = plt.subplots(figsize=(10, 4), squeeze=True)
     ax.set_ylabel("90th percentile request latency (ms)")
     ax.set_xlabel("Time (mm:ss)")
     plt.xticks(rotation=15)
@@ -129,13 +79,44 @@ def make_graph(input_folder, use_error_bars):
               fancybox=True, shadow=True, ncol=3)
     ax.xaxis.set_major_formatter(md.DateFormatter("%M:%S"))
     sns.lineplot(ax=ax, x="Time", y="Latency", data=prom_frame, legend=False)
-    plt.savefig("test.png", bbox_inches='tight', pad_inches=0.10)
+    output_graph = PLOT_DIR.joinpath("line_graph")
+    plt.savefig(output_graph.with_suffix(".png"),
+                bbox_inches="tight", pad_inches=0.10)
+    plt.savefig(output_graph.with_suffix(".pdf"),
+                bbox_inches="tight", pad_inches=0.10)
+    plt.gcf().clear()
+
+
+def make_bar_graph(input_folder):
+    stats_files = input_folder.glob("stats_*.csv")
+    stats_dfs = []
+    for stats_f in stats_files:
+        stats_dfs.append(pd.read_csv(stats_f))
+    stats_frame = pd.concat(stats_dfs)
+    stats_frame.reset_index(drop=True, inplace=True)
+    _, ax = plt.subplots(figsize=(10, 4), squeeze=True)
+    ax.xaxis.set_major_locator(ticker.MultipleLocator(1))
+    ax.set_xlabel("Time to detect in seconds")
+    sns.histplot(ax=ax, data=stats_frame, x="delta_s",
+                 kde="true", binwidth=1, kde_kws={"bw_adjust": 1})
+    output_graph = PLOT_DIR.joinpath("bar_graph")
+    plt.savefig(output_graph.with_suffix(".png"),
+                bbox_inches="tight", pad_inches=0.10)
+    plt.savefig(output_graph.with_suffix(".pdf"),
+                bbox_inches="tight", pad_inches=0.10)
     plt.gcf().clear()
 
 
 def main(args):
+    util.check_dir(PLOT_DIR)
     input_folder = Path(args.input_folder)
-    make_graph(input_folder, args.use_error_bars)
+    # Set consistent seaborn style for plotting
+    sns.set(style="white", rc={"lines.linewidth": 2.0,
+                               "axes.spines.right": False,
+                               "axes.spines.top": False,
+                               "lines.markeredgewidth": 0.1})
+    make_line_graph(input_folder, args.use_error_bars)
+    make_bar_graph(input_folder)
 
 
 if __name__ == "__main__":
