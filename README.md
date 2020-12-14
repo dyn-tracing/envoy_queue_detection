@@ -21,7 +21,9 @@ TBD
 
 ## Setup
 Once everything is installed, the Kubernetes cluster can be started with
-`./kube_env.py --setup`. This will take a couple minutes.
+`./kube_env.py --setup` if you are running on minikube or `./kube_env.py --setup -p GCP` 
+if you are running on google cloud. If you are running on google cloud, add `-p GCP` to
+all subsequent commands as well.  Starting the cluster will take a few minutes.
 
 We provide a pre-built filter. It can be deployed with the `./kube_env.py --filter-name webassemblyhub.io/fruffy/test-filter --deploy-filter ` command.
 We are currently working on a solution that deploys locally-built filters.
