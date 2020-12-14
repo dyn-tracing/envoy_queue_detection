@@ -1,0 +1,2 @@
+is_congested,ccongestion_start,congestion_detected,congestion_cleared,delta_ns,delta_s,lat_avg
+yes,20023233280.0,25293165568.0,40629789440.0,5269932288,5.269932288,0
