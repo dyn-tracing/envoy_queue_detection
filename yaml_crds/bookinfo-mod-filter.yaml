@@ -319,12 +319,12 @@ spec:
       version: v1
   template:
     metadata:
-      annotations:
-        sidecar.istio.io/userVolume: '[{"name":"wasmfilters-dir","configMap": {"name": "example-filter"}}]'
-        sidecar.istio.io/userVolumeMount: '[{"mountPath":"/var/local/lib/wasm-filters","name":"wasmfilters-dir"}]'
       labels:
         version: v1
         app: productpage
+      annotations:
+        sidecar.istio.io/userVolume: '[{"name":"wasmfilters-dir","configMap": {"name": "example-filter"}}]'
+        sidecar.istio.io/userVolumeMount: '[{"mountPath":"/var/local/lib/wasm-filters","name":"wasmfilters-dir"}]'
     spec:
       serviceAccountName: bookinfo-productpage
       containers:
