@@ -2,7 +2,6 @@
 import argparse
 import logging
 import sys
-import time
 import os
 from multiprocessing import Process
 from concurrent.futures import ThreadPoolExecutor
@@ -17,15 +16,10 @@ FILE_DIR = Path(__file__).parent.resolve()
 ROOT_DIR = FILE_DIR.parent
 ISTIO_DIR = FILE_DIR.joinpath("istio-1.8.0")
 ISTIO_BIN = ISTIO_DIR.joinpath("bin/istioctl")
-WASME_BIN = FILE_DIR.joinpath("bin/wasme")
-PATCHED_WASME_BIN = FILE_DIR.joinpath("bin/wasme_patched")
 YAML_DIR = FILE_DIR.joinpath("yaml_crds")
 TOOLS_DIR = FILE_DIR.joinpath("tools")
 
-FILTER_NAME = ""
 FILTER_DIR = FILE_DIR.joinpath("message_counter")
-FILTER_TAG = "1"
-FILTER_ID = "test"
 
 # the kubernetes python API sucks, but keep this for later
 
@@ -94,6 +88,7 @@ def deploy_bookinfo():
         log.error("Kubernetes is not set up."
                   " Did you run the deployment script?")
         sys.exit(util.EXIT_FAILURE)
+
     # launch bookinfo
     samples_dir = f"{ISTIO_DIR}/samples"
     bookinfo_dir = f"{samples_dir}/bookinfo"
@@ -241,7 +236,7 @@ def setup_bookinfo_deployment(platform, multizonal):
     return result
 
 
-def build_filter(filter_dir, filter_name):
+def build_filter(filter_dir):
     # Bazel is obnoxious, need to explicitly change dirs
     log.info("Building filter...")
     cmd = f"cd {filter_dir}; bazel build //:filter.wasm"
@@ -249,87 +244,53 @@ def build_filter(filter_dir, filter_name):
     if result != util.EXIT_SUCCESS:
         return result
 
-    cmd = f"{PATCHED_WASME_BIN} build precompiled"
-    cmd += f" {filter_dir}/bazel-bin/filter.wasm "
-    cmd += f"--tag {filter_name}:{FILTER_TAG}"
-    cmd += f" --config {filter_dir}/runtime-config.json"
-    result = util.exec_process(cmd)
-    log.info("Done with building filter...")
-    if result != util.EXIT_SUCCESS:
-        return result
-
-    log.info("Pushing the filter...")
-    cmd = f"{PATCHED_WASME_BIN} push {filter_name}:{FILTER_TAG}"
-    result = util.exec_process(cmd)
-    # Give it some room to breathe
-    time.sleep(2)
     return result
 
 
-def undeploy_filter(filter_name):
-    cmd = f"kubectl delete -f {YAML_DIR}/istio-config.yaml ; "
-    cmd += f"kubectl delete -f {YAML_DIR}/virtual-service-reviews-balance.yaml "
-    util.exec_process(cmd)
-    cmd = f"{WASME_BIN} undeploy istio {filter_name}:{FILTER_TAG} "
-    cmd += f"–provider=istio --id {FILTER_ID} "
-    cmd += "--labels \"app=reviews\" "
+def undeploy_filter():
+    cmd = f"kubectl delete -f {YAML_DIR}/filter.yaml "
     result = util.exec_process(cmd)
-    if result != util.EXIT_SUCCESS:
-        return result
-    bookinfo_wait()
     return result
 
 
-def deploy_filter(filter_name):
-    # first deploy with the unidirectional wasme binary
-    cmd = f"{WASME_BIN} deploy istio {filter_name}:{FILTER_TAG} "
-    cmd += f"–provider=istio --id {FILTER_ID} "
-    cmd += "--labels \"app=reviews\" "
+def deploy_filter(filter_dir):
+    # create the config map with the filter
+    cmd = "kubectl create configmap example-filter --from-file "
+    cmd += f"{filter_dir}/bazel-bin/filter.wasm --dry-run=client -o yaml "
+    cmd += "| kubectl apply -f -"
     result = util.exec_process(cmd)
     if result != util.EXIT_SUCCESS:
         return result
-    bookinfo_wait()
-    # after we have deployed with the working wasme, remove the deployment
-    undeploy_filter(filter_name)
-    # now redeploy with the patched bidirectional wasme
-    cmd = f"{PATCHED_WASME_BIN} deploy istio {filter_name}:{FILTER_TAG} "
-    cmd += f"–provider=istio --id {FILTER_ID} "
-    cmd += "--labels \"app=reviews\" "
-    result = util.exec_process(cmd)
-    bookinfo_wait()
-    # apply our customization configuration to the mesh
-    cmd = f"kubectl apply -f {YAML_DIR}/istio-config.yaml && "
-    cmd += f"kubectl apply -f {YAML_DIR}/virtual-service-reviews-balance.yaml "
-    result = util.exec_process(cmd)
 
+    cmd = f"kubectl replace -f {YAML_DIR}/bookinfo-mod-filter.yaml "
+    # FIXME: There is an issue with the yaml currently, so we ignore the result
+    _ = util.exec_process(cmd)
+
+    result = bookinfo_wait()
+    if result != util.EXIT_SUCCESS:
+        return result
+
+    cmd = f"kubectl apply -f {YAML_DIR}/filter.yaml "
+    result = util.exec_process(cmd)
     return result
 
 
-def refresh_filter(filter_dir, filter_name):
-    result = build_filter(filter_dir, filter_name)
-    if result != util.EXIT_SUCCESS:
-        return result
-    result = undeploy_filter(filter_name)
-    if result != util.EXIT_SUCCESS:
-        # A failure here is actually okay
-        log.warning("Undeploying failed.")
-    result = deploy_filter(filter_name)
+def refresh_filter():
+    # this is equivalent to a deployment restart right now
+    cmd = "kubectl rollout restart  deployments --namespace=default"
+    result = util.exec_process(cmd)
     return result
 
 
 def handle_filter(args):
-    if not args.filter_name:
-        log.error("The filter name is required to deploy filters with wasme. "
-                  "You can set it with the -fn or --filter-name argument.")
-        return util.EXIT_FAILURE
     if args.build_filter:
-        return build_filter(args.filter_dir, args.filter_name)
+        return build_filter(args.filter_dir)
     if args.deploy_filter:
-        return deploy_filter(args.filter_name)
+        return deploy_filter(args.filter_dir)
     if args.undeploy_filter:
-        return undeploy_filter(args.filter_name)
+        return undeploy_filter()
     if args.refresh_filter:
-        return refresh_filter(args.filter_dir, args.filter_name)
+        return refresh_filter()
     log.warning("No command line input provided. Do nothing.")
     return util.EXIT_SUCCESS
 
@@ -376,9 +337,6 @@ if __name__ == '__main__':
     parser.add_argument("-c", "--clean", dest="clean",
                         action="store_true",
                         help="Clean up an existing deployment. ")
-    parser.add_argument("-fn", "--filter-name", dest="filter_name",
-                        default=FILTER_NAME,
-                        help="The name of the filter to push to the Wasm Hub.")
     parser.add_argument("-fd", "--filter-dir", dest="filter_dir",
                         default=FILTER_DIR,
                         help="The directory of the filter")
@@ -390,16 +348,16 @@ if __name__ == '__main__':
                         help="Remove the bookinfo app. ")
     parser.add_argument("-bf", "--build-filter", dest="build_filter",
                         action="store_true",
-                        help="Build the WASME filter. ")
+                        help="Build the WASM filter. ")
     parser.add_argument("-df", "--deploy-filter", dest="deploy_filter",
                         action="store_true",
-                        help="Deploy the WASME filter. ")
+                        help="Deploy the WASM filter. ")
     parser.add_argument("-uf", "--undeploy-filter", dest="undeploy_filter",
                         action="store_true",
-                        help="Remove the WASME filter. ")
+                        help="Remove the WASM filter. ")
     parser.add_argument("-rf", "--refresh-filter", dest="refresh_filter",
                         action="store_true",
-                        help="Refresh the WASME filter. ")
+                        help="Refresh the WASM filter. ")
     parser.add_argument("-b", "--burst", dest="burst",
                         action="store_true",
                         help="Burst with HTTP requests to cause"

@@ -68,7 +68,6 @@ spec:
       annotations:
         sidecar.istio.io/userVolume: '[{"name":"wasmfilters-dir","configMap": {"name": "example-filter"}}]'
         sidecar.istio.io/userVolumeMount: '[{"mountPath":"/var/local/lib/wasm-filters","name":"wasmfilters-dir"}]'
-      annotations:
       labels:
         version: v1
         app: details
@@ -121,6 +120,8 @@ spec:
   template:
     metadata:
       annotations:
+        sidecar.istio.io/userVolume: '[{"name":"wasmfilters-dir","configMap": {"name": "example-filter"}}]'
+        sidecar.istio.io/userVolumeMount: '[{"mountPath":"/var/local/lib/wasm-filters","name":"wasmfilters-dir"}]'
       labels:
         version: v1
         app: ratings
@@ -173,6 +174,8 @@ spec:
   template:
     metadata:
       annotations:
+        sidecar.istio.io/userVolume: '[{"name":"wasmfilters-dir","configMap": {"name": "example-filter"}}]'
+        sidecar.istio.io/userVolumeMount: '[{"mountPath":"/var/local/lib/wasm-filters","name":"wasmfilters-dir"}]'
       labels:
         version: v1
         app: reviews
@@ -214,6 +217,8 @@ spec:
   template:
     metadata:
       annotations:
+        sidecar.istio.io/userVolume: '[{"name":"wasmfilters-dir","configMap": {"name": "example-filter"}}]'
+        sidecar.istio.io/userVolumeMount: '[{"mountPath":"/var/local/lib/wasm-filters","name":"wasmfilters-dir"}]'
       labels:
         version: v2
         app: reviews
@@ -255,6 +260,8 @@ spec:
   template:
     metadata:
       annotations:
+        sidecar.istio.io/userVolume: '[{"name":"wasmfilters-dir","configMap": {"name": "example-filter"}}]'
+        sidecar.istio.io/userVolumeMount: '[{"mountPath":"/var/local/lib/wasm-filters","name":"wasmfilters-dir"}]'
       labels:
         version: v3
         app: reviews

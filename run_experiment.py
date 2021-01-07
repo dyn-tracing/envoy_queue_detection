@@ -251,7 +251,7 @@ def main(args):
             args.platform, args.multizonal)
         if result != util.EXIT_SUCCESS:
             return result
-        result = kube_env.deploy_filter(args.filter_name)
+        result = kube_env.deploy_filter(args.filter_dir)
         if result != util.EXIT_SUCCESS:
             return result
     # test the fault injection on an existing deployment
@@ -286,9 +286,6 @@ if __name__ == '__main__':
                         help="Whether to do a full run. "
                         "This includes setting up bookinfo and Kubernetes"
                         " and tearing it down again.")
-    parser.add_argument("-fn", "--filter-name", dest="filter_name",
-                        default=kube_env.FILTER_NAME,
-                        help="The name of the filter to push to the Wasm Hub.")
     parser.add_argument("-fd", "--filter-dir", dest="filter_dir",
                         default=kube_env.FILTER_DIR,
                         help="The directory of the filter")
