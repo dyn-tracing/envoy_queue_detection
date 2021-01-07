@@ -261,15 +261,14 @@ def deploy_filter(filter_dir):
     result = util.exec_process(cmd)
     if result != util.EXIT_SUCCESS:
         return result
-
+    # update the containers with the config map
     cmd = f"kubectl replace -f {YAML_DIR}/bookinfo-mod-filter.yaml "
     # FIXME: There is an issue with the yaml currently, so we ignore the result
     _ = util.exec_process(cmd)
-
     result = bookinfo_wait()
     if result != util.EXIT_SUCCESS:
         return result
-
+    # now activate the filter
     cmd = f"kubectl apply -f {YAML_DIR}/filter.yaml "
     result = util.exec_process(cmd)
     return result
